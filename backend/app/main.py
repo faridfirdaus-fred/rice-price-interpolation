@@ -1,19 +1,25 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import requests
-import numpy as np
 from dotenv import load_dotenv
 import os
-from pydantic import BaseModel
+import numpy as np
+import requests
 from scipy.interpolate import CubicSpline
+from pydantic import BaseModel
+import json
+import uvicorn
 
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+    
 load_dotenv()
 
 app = FastAPI()
 
+# Update with your frontend URL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://your-frontend-domain.com"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,36 +35,38 @@ class PredictionRequest(BaseModel):
 @app.post("/predict")
 def predict(request: PredictionRequest):
     try:
+        # Fetch and process data
         rice_data = fetch_rice_price_data()
 
         predictions = {}
+        target_date = request.year + (request.month - 1) / 12.0
 
         for quality, (x, y) in rice_data.items():
-            if len(x) < 2:
-                predictions[quality] = {"error": "Not enough data to interpolate"}
+            try:
+                # Create cubic spline interpolation
+                cs = CubicSpline(x, y)
+                
+                # Find the closest previous date in our data
+                previous_date_idx = np.where(x < target_date)[0]
+                
+                if len(previous_date_idx) > 0:
+                    previous_date_idx = previous_date_idx[-1]
+                    previous_date = x[previous_date_idx]
+                    previous_price = y[previous_date_idx]
+                else:
+                    previous_date = x[0]
+                    previous_price = y[0]
+                
+                # Get the estimated price using the spline
+                estimated_price = float(cs(target_date))
+                
+                predictions[quality] = {
+                    "estimated_price": round(estimated_price),
+                    "previous_price": round(previous_price)
+                }
+            except Exception as e:
+                print(f"Error calculating prediction for {quality}: {str(e)}")
                 continue
-
-            spline = CubicSpline(x, y, bc_type='natural')
-
-            # Tahun dan bulan yang diminta
-            query_point = request.year + (request.month - 1) / 12.0
-            estimated_price = float(spline(query_point))
-
-            # Tahun dan bulan sebelumnya
-            if request.month == 1:
-                prev_year = request.year - 1
-                prev_month = 12
-            else:
-                prev_year = request.year
-                prev_month = request.month - 1
-
-            previous_point = prev_year + (prev_month - 1) / 12.0
-            previous_price = float(spline(previous_point))
-
-            predictions[quality] = {
-                "estimated_price": estimated_price,
-                "previous_price": previous_price,
-            }
 
         return {
             "year": request.year,
@@ -67,14 +75,13 @@ def predict(request: PredictionRequest):
         }
 
     except RuntimeError as e:
-        return {"error": str(e)}
-    except ValueError as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 def fetch_rice_price_data():
     try:
+        print(f"Fetching data from: {BPS_URL}")
         response = requests.get(BPS_URL)
         response.raise_for_status()
         result = response.json()
@@ -103,18 +110,20 @@ def fetch_rice_price_data():
 
                     year = 1900 + year_code if year_code >= 100 else 2000 + year_code
                     month_value = year + (month_code - 1) / 12.0
-
-                    if quality_code == '1':
-                        months_dict["premium"].append(month_value)
-                        prices_dict["premium"].append(float(price))
-                    elif quality_code == '2':
-                        months_dict["medium"].append(month_value)
-                        prices_dict["medium"].append(float(price))
-                    elif quality_code == '3':
-                        months_dict["low_quality"].append(month_value)
-                        prices_dict["low_quality"].append(float(price))
-
+                    
+                    # Map quality codes to quality types
+                    quality_map = {"1": "premium", "2": "medium", "3": "low_quality"}
+                    quality = quality_map.get(quality_code)
+                    
+                    if quality and price:
+                        try:
+                            price_value = float(price)
+                            months_dict[quality].append(month_value)
+                            prices_dict[quality].append(price_value)
+                        except ValueError:
+                            continue
             except (ValueError, TypeError, AttributeError) as e:
+                print(f"Error processing data point {key}: {e}")
                 continue
 
         processed_data = {}
@@ -122,7 +131,7 @@ def fetch_rice_price_data():
             months = np.array(months_dict[quality])
             prices = np.array(prices_dict[quality])
 
-            if len(months) == 0 or len(prices) == 0:
+            if len(months) < 4:  # Need at least 4 points for cubic spline
                 continue
 
             sorted_indices = np.argsort(months)
@@ -130,13 +139,16 @@ def fetch_rice_price_data():
             prices = prices[sorted_indices]
 
             unique_months, unique_indices = np.unique(months, return_index=True)
-            months = unique_months
-            prices = prices[unique_indices]
+            unique_prices = prices[unique_indices]
 
-            if not np.all(np.diff(months) > 0):
-                raise ValueError(f"Month data for {quality} is not strictly increasing after processing.")
+            if len(unique_months) < 4:
+                continue
 
-            processed_data[quality] = (months, prices)
+            if not np.all(np.diff(unique_months) > 0):
+                print(f"Warning: Month data for {quality} is not strictly increasing after processing.")
+                continue
+
+            processed_data[quality] = (unique_months, unique_prices)
 
         if not processed_data:
             raise ValueError("No valid data found after processing.")
@@ -149,3 +161,8 @@ def fetch_rice_price_data():
         raise RuntimeError(f"Data processing error: {e}")
     except Exception as e:
         raise RuntimeError(f"Unexpected error: {e}")
+
+# Add debug endpoint to test API connection
+@app.get("/")
+def read_root():
+    return {"status": "API is running"}
