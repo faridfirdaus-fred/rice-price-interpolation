@@ -9,13 +9,10 @@ from pydantic import BaseModel
 import json
 import uvicorn
 
-import uvicorn
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
-    
+# Load environment variables first
 load_dotenv()
 
+# Define the app before any conditional blocks
 app = FastAPI()
 
 # Update with your frontend URL
@@ -23,7 +20,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins during development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -170,3 +167,6 @@ def fetch_rice_price_data():
 @app.get("/")
 def read_root():
     return {"status": "API is running"}
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000)
