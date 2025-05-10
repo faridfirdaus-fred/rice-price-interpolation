@@ -1,12 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, List
+from app.services.regression import perform_polynomial_regression
+from app.services.interpolation import perform_cubic_spline_interpolation
 from app.utils import fetch_rice_price_data
-from scipy.interpolate import CubicSpline
+from app.config import settings  # Import settings
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 router = APIRouter()
 
@@ -17,39 +16,32 @@ class PredictionRequest(BaseModel):
 class PredictionResponse(BaseModel):
     year: int
     month: int
-    predictions: Dict[str, Dict[str, Any]]  # Contains estimated and previous prices for each quality
+    predictions: Dict[str, Dict[str, Any]]
 
 @router.post("/predictions", response_model=PredictionResponse)
 async def predict(request: PredictionRequest):
     try:
-        # Get API URL from environment variable
-        API_KEY = os.getenv("API_KEY")
-        BPS_URL = f"https://webapi.bps.go.id/v1/api/list/model/data/lang/ind/domain/0000/var/500/key/{API_KEY}"
-        
-        # Pass the URL to the function
-        rice_data = fetch_rice_price_data(BPS_URL)
+        # Only allow predictions after December 2023
+        if request.year < 2024 or (request.year == 2023 and request.month <= 12):
+            raise HTTPException(status_code=400, detail="Prediction is only available for dates after December 2023. For historical data, use the /historical endpoint.")
 
+        # Pass API URL from settings
+        rice_data = fetch_rice_price_data(settings.bps_url)
         predictions = {}
 
-        for quality, (x, y) in rice_data.items():
-            if len(x) < 2:
+        # Gabungkan year dan month ke float
+        predict_month = request.year + (request.month - 1) / 12
+        previous_month = request.month - 1 if request.month > 1 else 12
+        previous_year = request.year if request.month > 1 else request.year - 1
+        previous_month_float = previous_year + (previous_month - 1) / 12
+
+        for quality, (months, prices) in rice_data.items():
+            if len(months) < 2:
                 predictions[quality] = {"error": "Not enough data to interpolate"}
                 continue
 
-            spline = CubicSpline(x, y, bc_type='natural')
-
-            query_point = request.year + (request.month - 1) / 12.0
-            estimated_price = float(spline(query_point))
-
-            if request.month == 1:
-                prev_year = request.year - 1
-                prev_month = 12
-            else:
-                prev_year = request.year
-                prev_month = request.month - 1
-
-            previous_point = prev_year + (prev_month - 1) / 12.0
-            previous_price = float(spline(previous_point))
+            estimated_price = perform_polynomial_regression(months, prices, predict_month=predict_month)
+            previous_price = perform_cubic_spline_interpolation(months, prices, predict_month=previous_month_float)
 
             predictions[quality] = {
                 "estimated_price": estimated_price,
@@ -62,5 +54,25 @@ async def predict(request: PredictionRequest):
             "predictions": predictions,
         }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class HistoricalResponse(BaseModel):
+    historical: Dict[str, List[Dict[str, Any]]]
+
+@router.get("/historical", response_model=HistoricalResponse)
+async def get_historical():
+    try:
+        # Pass API URL from settings
+        rice_data = fetch_rice_price_data(settings.bps_url)
+        
+        # Format for chart: {quality: [{year, month, price}, ...]}
+        historical = {}
+        for quality, (months, prices) in rice_data.items():
+            historical[quality] = [
+                {"month": int((m % 1) * 12) + 1, "year": int(m), "price": float(p)}
+                for m, p in zip(months, prices)
+            ]
+        return {"historical": historical}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

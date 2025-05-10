@@ -1,4 +1,5 @@
-from pydantic import BaseSettings
+# filepath: c:\Users\faridfred\Documents\Development\rice-price-interpolation\app\config.py
+from pydantic_settings import BaseSettings  # Perubahan di sini
 from dotenv import load_dotenv
 import os
 
