@@ -8,8 +8,15 @@ def fetch_rice_price_data(api_url):
         result = response.json()
 
         datacontent = result.get("datacontent", {})
+        tahun_list = result.get("tahun", [])
+        turtahun_list = result.get("turtahun", [])
         if not datacontent:
             raise ValueError("API response does not contain 'datacontent' or it is empty.")
+
+        # Build mapping from val to label for year and month
+        tahun_map = {str(t["val"]): int(t["label"]) for t in tahun_list}
+        # Use val (1-12) directly for months
+        bulan_map = {str(b["val"]): b["val"] for b in turtahun_list if isinstance(b["val"], int) and 1 <= b["val"] <= 12}
 
         months_dict = {
             "premium": [],
@@ -24,24 +31,32 @@ def fetch_rice_price_data(api_url):
 
         for key, price in datacontent.items():
             try:
-                if len(key) >= 9:
-                    quality_code = key[0:1]
-                    year_code = int(key[5:7])
-                    month_code = int(key[7:])
-
-                    year = 1900 + year_code if year_code >= 100 else 2000 + year_code
-                    month_value = year + (month_code - 1) / 12.0
-
-                    if quality_code == '1':
-                        months_dict["premium"].append(month_value)
-                        prices_dict["premium"].append(float(price))
-                    elif quality_code == '2':
-                        months_dict["medium"].append(month_value)
-                        prices_dict["medium"].append(float(price))
-                    elif quality_code == '3':
-                        months_dict["low_quality"].append(month_value)
-                        prices_dict["low_quality"].append(float(price))
-
+                # Key format: [quality][var][tahun][bulan], e.g. 150001131 (1=quality, 50001=var, 13=year, 1=month)
+                # Extract quality
+                quality_code = key[0:1]
+                # Extract year and month val (handle 1 or 2 digit month)
+                # Find the year and month val by matching against all possible combinations
+                found = False
+                for yval in tahun_map:
+                    for bval in bulan_map:
+                        if key.endswith(f"{yval}{bval}"):
+                            year = tahun_map[yval]
+                            month = bulan_map[bval]
+                            month_value = year + (month - 1) / 12.0
+                            if quality_code == '1':
+                                months_dict["premium"].append(month_value)
+                                prices_dict["premium"].append(float(price))
+                            elif quality_code == '2':
+                                months_dict["medium"].append(month_value)
+                                prices_dict["medium"].append(float(price))
+                            elif quality_code == '3':
+                                months_dict["low_quality"].append(month_value)
+                                prices_dict["low_quality"].append(float(price))
+                            found = True
+                            break
+                    if found:
+                        break
+                # If not found, skip
             except (ValueError, TypeError, AttributeError):
                 continue
 
